@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"io"
 
-	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/spf13/cobra"
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -31,6 +31,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
+
+	"k8s.io/client-go/tools/clientcmd"
 
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
@@ -70,7 +72,7 @@ type AnnotateFlags struct {
 // NewAnnotateFlags returns a default AnnotateFlags
 func NewAnnotateFlags(streams genericiooptions.IOStreams) *AnnotateFlags {
 	return &AnnotateFlags{
-		PrintFlags:  genericclioptions.NewPrintFlags("annotate").WithTypeSetter(scheme.Scheme),
+		PrintFlags:  genericclioptions.NewPrintFlags("annotated").WithTypeSetter(scheme.Scheme),
 		RecordFlags: genericclioptions.NewRecordFlags(),
 		IOStreams:   streams,
 	}
@@ -227,7 +229,7 @@ func (flags *AnnotateFlags) ToOptions(f cmdutil.Factory, cmd *cobra.Command, arg
 	}
 
 	options.namespace, options.enforceNamespace, err = f.ToRawKubeConfigLoader().Namespace()
-	if err != nil {
+	if err != nil && !(options.local && clientcmd.IsEmptyConfig(err)) {
 		return nil, err
 	}
 	options.builder = f.NewBuilder()

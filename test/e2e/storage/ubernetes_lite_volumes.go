@@ -33,15 +33,16 @@ import (
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 var _ = utils.SIGDescribe("Multi-AZ Cluster Volumes", func() {
 	f := framework.NewDefaultFramework("multi-az")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 	var zoneCount int
 	var err error
-	image := framework.ServeHostnameImage
+	image := imageutils.GetE2EImage(imageutils.Agnhost)
 	ginkgo.BeforeEach(func(ctx context.Context) {
 		e2eskipper.SkipUnlessProviderIs("gce", "gke")
 		if zoneCount <= 0 {
@@ -136,7 +137,7 @@ func PodsUseStaticPVsOrFail(ctx context.Context, f *framework.Framework, podCoun
 
 	ginkgo.By("Creating pods for each static PV")
 	for _, config := range configs {
-		podConfig := e2epod.MakePod(ns, nil, []*v1.PersistentVolumeClaim{config.pvc}, false, "")
+		podConfig := e2epod.MakePod(ns, nil, []*v1.PersistentVolumeClaim{config.pvc}, f.NamespacePodSecurityLevel, "")
 		config.pod, err = c.CoreV1().Pods(ns).Create(ctx, podConfig, metav1.CreateOptions{})
 		framework.ExpectNoError(err)
 	}

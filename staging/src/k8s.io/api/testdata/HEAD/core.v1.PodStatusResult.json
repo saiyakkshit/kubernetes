@@ -59,6 +59,11 @@
     "reason": "reasonValue",
     "nominatedNodeName": "nominatedNodeNameValue",
     "hostIP": "hostIPValue",
+    "hostIPs": [
+      {
+        "ip": "ipValue"
+      }
+    ],
     "podIP": "podIPValue",
     "podIPs": [
       {
@@ -126,6 +131,23 @@
               "name": "nameValue"
             }
           ]
+        },
+        "volumeMounts": [
+          {
+            "name": "nameValue",
+            "mountPath": "mountPathValue",
+            "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue"
+          }
+        ],
+        "user": {
+          "linux": {
+            "uid": 1,
+            "gid": 2,
+            "supplementalGroups": [
+              3
+            ]
+          }
         }
       }
     ],
@@ -189,6 +211,23 @@
               "name": "nameValue"
             }
           ]
+        },
+        "volumeMounts": [
+          {
+            "name": "nameValue",
+            "mountPath": "mountPathValue",
+            "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue"
+          }
+        ],
+        "user": {
+          "linux": {
+            "uid": 1,
+            "gid": 2,
+            "supplementalGroups": [
+              3
+            ]
+          }
         }
       }
     ],
@@ -253,9 +292,32 @@
               "name": "nameValue"
             }
           ]
+        },
+        "volumeMounts": [
+          {
+            "name": "nameValue",
+            "mountPath": "mountPathValue",
+            "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue"
+          }
+        ],
+        "user": {
+          "linux": {
+            "uid": 1,
+            "gid": 2,
+            "supplementalGroups": [
+              3
+            ]
+          }
         }
       }
     ],
-    "resize": "resizeValue"
+    "resize": "resizeValue",
+    "resourceClaimStatuses": [
+      {
+        "name": "nameValue",
+        "resourceClaimName": "resourceClaimNameValue"
+      }
+    ]
   }
 }

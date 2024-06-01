@@ -167,10 +167,12 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 	defer cc.EventBroadcaster.Shutdown()
 
 	// Setup healthz checks.
-	var checks []healthz.HealthChecker
+	var checks, readyzChecks []healthz.HealthChecker
 	if cc.ComponentConfig.LeaderElection.LeaderElect {
 		checks = append(checks, cc.LeaderElection.WatchDog)
+		readyzChecks = append(readyzChecks, cc.LeaderElection.WatchDog)
 	}
+	readyzChecks = append(readyzChecks, healthz.NewShutdownHealthz(ctx.Done()))
 
 	waitingForLeader := make(chan struct{})
 	isLeader := func() bool {
@@ -184,9 +186,20 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 		}
 	}
 
+	handlerSyncReadyCh := make(chan struct{})
+	handlerSyncCheck := healthz.NamedCheck("sched-handler-sync", func(_ *http.Request) error {
+		select {
+		case <-handlerSyncReadyCh:
+			return nil
+		default:
+		}
+		return fmt.Errorf("waiting for handlers to sync")
+	})
+	readyzChecks = append(readyzChecks, handlerSyncCheck)
+
 	// Start up the healthz server.
 	if cc.SecureServing != nil {
-		handler := buildHandlerChain(newHealthzAndMetricsHandler(&cc.ComponentConfig, cc.InformerFactory, isLeader, checks...), cc.Authentication.Authenticator, cc.Authorization.Authorizer)
+		handler := buildHandlerChain(newHealthEndpointsAndMetricsHandler(&cc.ComponentConfig, cc.InformerFactory, isLeader, checks, readyzChecks), cc.Authentication.Authenticator, cc.Authorization.Authorizer)
 		// TODO: handle stoppedCh and listenerStoppedCh returned by c.SecureServing.Serve
 		if _, _, err := cc.SecureServing.Serve(handler, 0, ctx.Done()); err != nil {
 			// fail early for secure handlers, removing the old error loop from above
@@ -194,25 +207,42 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 		}
 	}
 
-	// Start all informers.
-	cc.InformerFactory.Start(ctx.Done())
-	// DynInformerFactory can be nil in tests.
-	if cc.DynInformerFactory != nil {
-		cc.DynInformerFactory.Start(ctx.Done())
-	}
+	startInformersAndWaitForSync := func(ctx context.Context) {
+		// Start all informers.
+		cc.InformerFactory.Start(ctx.Done())
+		// DynInformerFactory can be nil in tests.
+		if cc.DynInformerFactory != nil {
+			cc.DynInformerFactory.Start(ctx.Done())
+		}
 
-	// Wait for all caches to sync before scheduling.
-	cc.InformerFactory.WaitForCacheSync(ctx.Done())
-	// DynInformerFactory can be nil in tests.
-	if cc.DynInformerFactory != nil {
-		cc.DynInformerFactory.WaitForCacheSync(ctx.Done())
-	}
+		// Wait for all caches to sync before scheduling.
+		cc.InformerFactory.WaitForCacheSync(ctx.Done())
+		// DynInformerFactory can be nil in tests.
+		if cc.DynInformerFactory != nil {
+			cc.DynInformerFactory.WaitForCacheSync(ctx.Done())
+		}
 
+		// Wait for all handlers to sync (all items in the initial list delivered) before scheduling.
+		if err := sched.WaitForHandlersSync(ctx); err != nil {
+			logger.Error(err, "waiting for handlers to sync")
+		}
+
+		close(handlerSyncReadyCh)
+		logger.V(3).Info("Handlers synced")
+	}
+	if !cc.ComponentConfig.DelayCacheUntilActive || cc.LeaderElection == nil {
+		startInformersAndWaitForSync(ctx)
+	}
 	// If leader election is enabled, runCommand via LeaderElector until done and exit.
 	if cc.LeaderElection != nil {
 		cc.LeaderElection.Callbacks = leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				close(waitingForLeader)
+				if cc.ComponentConfig.DelayCacheUntilActive {
+					logger.Info("Starting informers and waiting for sync...")
+					startInformersAndWaitForSync(ctx)
+					logger.Info("Sync completed")
+				}
 				sched.Run(ctx)
 			},
 			OnStoppedLeading: func() {
@@ -272,15 +302,17 @@ func installMetricHandler(pathRecorderMux *mux.PathRecorderMux, informers inform
 	})
 }
 
-// newHealthzAndMetricsHandler creates a healthz server from the config, and will also
+// newHealthEndpointsAndMetricsHandler creates an API health server from the config, and will also
 // embed the metrics handler.
-func newHealthzAndMetricsHandler(config *kubeschedulerconfig.KubeSchedulerConfiguration, informers informers.SharedInformerFactory, isLeader func() bool, checks ...healthz.HealthChecker) http.Handler {
+// TODO: healthz check is deprecated, please use livez and readyz instead. Will be removed in the future.
+func newHealthEndpointsAndMetricsHandler(config *kubeschedulerconfig.KubeSchedulerConfiguration, informers informers.SharedInformerFactory, isLeader func() bool, healthzChecks, readyzChecks []healthz.HealthChecker) http.Handler {
 	pathRecorderMux := mux.NewPathRecorderMux("kube-scheduler")
-	healthz.InstallHandler(pathRecorderMux, checks...)
+	healthz.InstallHandler(pathRecorderMux, healthzChecks...)
+	healthz.InstallLivezHandler(pathRecorderMux)
+	healthz.InstallReadyzHandler(pathRecorderMux, readyzChecks...)
 	installMetricHandler(pathRecorderMux, informers, isLeader)
-	if utilfeature.DefaultFeatureGate.Enabled(features.ComponentSLIs) {
-		slis.SLIMetricsWithReset{}.Install(pathRecorderMux)
-	}
+	slis.SLIMetricsWithReset{}.Install(pathRecorderMux)
+
 	if config.EnableProfiling {
 		routes.Profiling{}.Install(pathRecorderMux)
 		if config.EnableContentionProfiling {
@@ -335,11 +367,11 @@ func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions 
 	recorderFactory := getRecorderFactory(&cc)
 	completedProfiles := make([]kubeschedulerconfig.KubeSchedulerProfile, 0)
 	// Create the scheduler.
-	sched, err := scheduler.New(cc.Client,
+	sched, err := scheduler.New(ctx,
+		cc.Client,
 		cc.InformerFactory,
 		cc.DynInformerFactory,
 		recorderFactory,
-		ctx.Done(),
 		scheduler.WithComponentConfigVersion(cc.ComponentConfig.TypeMeta.APIVersion),
 		scheduler.WithKubeConfig(cc.KubeConfig),
 		scheduler.WithProfiles(cc.ComponentConfig.Profiles...),

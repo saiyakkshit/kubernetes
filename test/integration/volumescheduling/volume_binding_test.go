@@ -21,14 +21,12 @@ package volumescheduling
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"k8s.io/klog/v2"
-	"k8s.io/klog/v2/ktesting"
 
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -427,10 +425,7 @@ func testVolumeBindingStress(t *testing.T, schedulerResyncPeriod time.Duration, 
 
 	// Set max volume limit to the number of PVCs the test will create
 	// TODO: remove when max volume limit allows setting through storageclass
-	if err := os.Setenv(nodevolumelimits.KubeMaxPDVols, fmt.Sprintf("%v", podLimit*volsPerPod)); err != nil {
-		t.Fatalf("failed to set max pd limit: %v", err)
-	}
-	defer os.Unsetenv(nodevolumelimits.KubeMaxPDVols)
+	t.Setenv(nodevolumelimits.KubeMaxPDVols, fmt.Sprintf("%v", podLimit*volsPerPod))
 
 	scName := &classWait
 	if dynamic {
@@ -998,10 +993,7 @@ func TestRescheduleProvisioning(t *testing.T) {
 	ns := testCtx.NS.Name
 
 	defer func() {
-		testCtx.CancelFn()
 		deleteTestObjects(clientset, ns, metav1.DeleteOptions{})
-		testCtx.ClientSet.CoreV1().Nodes().DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{})
-		testCtx.CloseFn()
 	}()
 
 	ctrl, informerFactory, err := initPVController(t, testCtx, 0)
@@ -1049,7 +1041,7 @@ func TestRescheduleProvisioning(t *testing.T) {
 
 func setupCluster(t *testing.T, nsName string, numberOfNodes int, resyncPeriod time.Duration, provisionDelaySeconds int) *testConfig {
 	testCtx := testutil.InitTestSchedulerWithOptions(t, testutil.InitTestAPIServer(t, nsName, nil), resyncPeriod)
-	testutil.SyncInformerFactory(testCtx)
+	testutil.SyncSchedulerInformerFactory(testCtx)
 	go testCtx.Scheduler.Run(testCtx.Ctx)
 
 	clientset := testCtx.ClientSet
@@ -1087,7 +1079,6 @@ func setupCluster(t *testing.T, nsName string, numberOfNodes int, resyncPeriod t
 		teardown: func() {
 			klog.Infof("test cluster %q start to tear down", ns)
 			deleteTestObjects(clientset, ns, metav1.DeleteOptions{})
-			testutil.CleanupTest(t, testCtx)
 		},
 	}
 }
@@ -1120,8 +1111,6 @@ func initPVController(t *testing.T, testCtx *testutil.TestContext, provisionDela
 		// https://github.com/kubernetes/kubernetes/issues/85320
 		SyncPeriod:                5 * time.Second,
 		VolumePlugins:             plugins,
-		Cloud:                     nil,
-		ClusterName:               "volume-test-cluster",
 		VolumeInformer:            informerFactory.Core().V1().PersistentVolumes(),
 		ClaimInformer:             informerFactory.Core().V1().PersistentVolumeClaims(),
 		ClassInformer:             informerFactory.Storage().V1().StorageClasses(),
@@ -1129,8 +1118,7 @@ func initPVController(t *testing.T, testCtx *testutil.TestContext, provisionDela
 		NodeInformer:              informerFactory.Core().V1().Nodes(),
 		EnableDynamicProvisioning: true,
 	}
-	_, ctx := ktesting.NewTestContext(t)
-	ctrl, err := persistentvolume.NewController(ctx, params)
+	ctrl, err := persistentvolume.NewController(testCtx.Ctx, params)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1226,7 +1214,7 @@ func makePVC(name, ns string, scName *string, volumeName string) *v1.PersistentV
 			AccessModes: []v1.PersistentVolumeAccessMode{
 				v1.ReadWriteOnce,
 			},
-			Resources: v1.ResourceRequirements{
+			Resources: v1.VolumeResourceRequirements{
 				Requests: v1.ResourceList{
 					v1.ResourceName(v1.ResourceStorage): resource.MustParse("5Gi"),
 				},

@@ -18,7 +18,6 @@ package testing
 
 import (
 	"fmt"
-	"k8s.io/klog/v2"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -26,6 +25,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/exec"
@@ -82,7 +83,8 @@ const (
 	SuccessAndFailOnMountDeviceName = "success-and-failed-mount-device-name"
 
 	// FailWithInUseVolumeName will cause NodeExpandVolume to result in FailedPrecondition error
-	FailWithInUseVolumeName = "fail-expansion-in-use"
+	FailWithInUseVolumeName       = "fail-expansion-in-use"
+	FailWithUnSupportedVolumeName = "fail-expansion-unsupported"
 
 	FailVolumeExpansion = "fail-expansion-test"
 
@@ -210,7 +212,6 @@ var _ volume.RecyclableVolumePlugin = &FakeVolumePlugin{}
 var _ volume.DeletableVolumePlugin = &FakeVolumePlugin{}
 var _ volume.ProvisionableVolumePlugin = &FakeVolumePlugin{}
 var _ volume.AttachableVolumePlugin = &FakeVolumePlugin{}
-var _ volume.VolumePluginWithAttachLimits = &FakeVolumePlugin{}
 var _ volume.DeviceMountableVolumePlugin = &FakeVolumePlugin{}
 var _ volume.NodeExpandableVolumePlugin = &FakeVolumePlugin{}
 
@@ -230,7 +231,7 @@ func (plugin *FakeVolumePlugin) getFakeVolume(list *[]*FakeVolume) *FakeVolume {
 		WaitForAttachHook: plugin.WaitForAttachHook,
 		UnmountDeviceHook: plugin.UnmountDeviceHook,
 	}
-	volume.VolumesAttached = make(map[string]sets.String)
+	volume.VolumesAttached = make(map[string]sets.Set[string])
 	volume.DeviceMountState = make(map[string]string)
 	volume.VolumeMountState = make(map[string]string)
 	if list != nil {
@@ -287,10 +288,6 @@ func (plugin *FakeVolumePlugin) RequiresRemount(spec *volume.Spec) bool {
 
 func (plugin *FakeVolumePlugin) SupportsMountOption() bool {
 	return true
-}
-
-func (plugin *FakeVolumePlugin) SupportsBulkVolumeVerification() bool {
-	return false
 }
 
 func (plugin *FakeVolumePlugin) SupportsSELinuxContextMount(spec *volume.Spec) (bool, error) {
@@ -499,8 +496,12 @@ func (plugin *FakeVolumePlugin) NodeExpand(resizeOptions volume.NodeResizeOption
 	if resizeOptions.VolumeSpec.Name() == FailWithInUseVolumeName {
 		return false, volumetypes.NewFailedPreconditionError("volume-in-use")
 	}
+	if resizeOptions.VolumeSpec.Name() == FailWithUnSupportedVolumeName {
+		return false, volumetypes.NewOperationNotSupportedError("volume-unsupported")
+	}
+
 	if resizeOptions.VolumeSpec.Name() == AlwaysFailNodeExpansion {
-		return false, fmt.Errorf("Test failure: NodeExpand")
+		return false, fmt.Errorf("test failure: NodeExpand")
 	}
 
 	if resizeOptions.VolumeSpec.Name() == FailVolumeExpansion {
@@ -557,10 +558,6 @@ func (f *FakeBasicVolumePlugin) NewUnmounter(volName string, podUID types.UID) (
 
 func (f *FakeBasicVolumePlugin) RequiresRemount(spec *volume.Spec) bool {
 	return f.Plugin.RequiresRemount(spec)
-}
-
-func (f *FakeBasicVolumePlugin) SupportsBulkVolumeVerification() bool {
-	return f.Plugin.SupportsBulkVolumeVerification()
 }
 
 func (f *FakeBasicVolumePlugin) SupportsSELinuxContextMount(spec *volume.Spec) (bool, error) {
@@ -644,10 +641,6 @@ func (plugin *FakeFileVolumePlugin) SupportsMountOption() bool {
 	return false
 }
 
-func (plugin *FakeFileVolumePlugin) SupportsBulkVolumeVerification() bool {
-	return false
-}
-
 func (plugin *FakeFileVolumePlugin) SupportsSELinuxContextMount(spec *volume.Spec) (bool, error) {
 	return false, nil
 }
@@ -674,7 +667,7 @@ type FakeVolume struct {
 	VolName string
 	Plugin  *FakeVolumePlugin
 	volume.MetricsNil
-	VolumesAttached  map[string]sets.String
+	VolumesAttached  map[string]sets.Set[string]
 	DeviceMountState map[string]string
 	VolumeMountState map[string]string
 
@@ -868,8 +861,8 @@ func (fv *FakeVolume) GetSetUpDeviceCallCount() int {
 
 // Block volume support
 func (fv *FakeVolume) GetGlobalMapPath(spec *volume.Spec) (string, error) {
-	fv.RLock()
-	defer fv.RUnlock()
+	fv.Lock()
+	defer fv.Unlock()
 	fv.GlobalMapPathCallCount++
 	return fv.getGlobalMapPath()
 }
@@ -1016,7 +1009,7 @@ func (fv *FakeVolume) Attach(spec *volume.Spec, nodeName types.NodeName) (string
 		return "", fmt.Errorf("volume %q trying to attach to node %q is already attached to node %q", volumeName, nodeName, volumeNodes)
 	}
 
-	fv.VolumesAttached[volumeName] = sets.NewString(string(nodeName))
+	fv.VolumesAttached[volumeName] = sets.New[string](string(nodeName))
 	if nodeName == UncertainAttachNode || nodeName == TimeoutAttachNode {
 		return "", fmt.Errorf("timed out to attach volume %q to node %q", volumeName, nodeName)
 	}
@@ -1706,7 +1699,7 @@ func CreateTestPVC(capacity string, accessModes []v1.PersistentVolumeAccessMode)
 		},
 		Spec: v1.PersistentVolumeClaimSpec{
 			AccessModes: accessModes,
-			Resources: v1.ResourceRequirements{
+			Resources: v1.VolumeResourceRequirements{
 				Requests: v1.ResourceList{
 					v1.ResourceName(v1.ResourceStorage): resource.MustParse(capacity),
 				},

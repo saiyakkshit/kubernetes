@@ -46,6 +46,7 @@ import (
 	kubeapiservertesting "k8s.io/kubernetes/cmd/kube-apiserver/app/testing"
 	"k8s.io/kubernetes/test/integration"
 	"k8s.io/kubernetes/test/integration/framework"
+	"k8s.io/kubernetes/test/utils/ktesting"
 )
 
 const (
@@ -189,7 +190,8 @@ func TestStatus(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, kubeConfig, tearDownFn := framework.StartTestServer(t, framework.TestServerSetup{
+			tCtx := ktesting.Init(t)
+			_, kubeConfig, tearDownFn := framework.StartTestServer(tCtx, t, framework.TestServerSetup{
 				ModifyServerRunOptions: func(options *options.ServerRunOptions) {
 					if tc.modifyOptions != nil {
 						tc.modifyOptions(options)

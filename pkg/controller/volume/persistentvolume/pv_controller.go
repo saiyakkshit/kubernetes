@@ -41,13 +41,11 @@ import (
 	"k8s.io/client-go/tools/record"
 	ref "k8s.io/client-go/tools/reference"
 	"k8s.io/client-go/util/workqueue"
-	cloudprovider "k8s.io/cloud-provider"
 	volerr "k8s.io/cloud-provider/volume/errors"
 	storagehelpers "k8s.io/component-helpers/storage/volume"
 	"k8s.io/kubernetes/pkg/controller/volume/common"
 	"k8s.io/kubernetes/pkg/controller/volume/events"
 	"k8s.io/kubernetes/pkg/controller/volume/persistentvolume/metrics"
-	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
 	"k8s.io/kubernetes/pkg/util/goroutinemap"
 	"k8s.io/kubernetes/pkg/util/goroutinemap/exponentialbackoff"
 	vol "k8s.io/kubernetes/pkg/volume"
@@ -120,18 +118,6 @@ import (
 // claims at the same time. The controller must recover from any conflicts
 // that may arise from these conditions.
 
-// CloudVolumeCreatedForClaimNamespaceTag is a name of a tag attached to a real volume in cloud (e.g. AWS EBS or GCE PD)
-// with namespace of a persistent volume claim used to create this volume.
-const CloudVolumeCreatedForClaimNamespaceTag = "kubernetes.io/created-for/pvc/namespace"
-
-// CloudVolumeCreatedForClaimNameTag is a name of a tag attached to a real volume in cloud (e.g. AWS EBS or GCE PD)
-// with name of a persistent volume claim used to create this volume.
-const CloudVolumeCreatedForClaimNameTag = "kubernetes.io/created-for/pvc/name"
-
-// CloudVolumeCreatedForVolumeNameTag is a name of a tag attached to a real volume in cloud (e.g. AWS EBS or GCE PD)
-// with name of appropriate Kubernetes persistent volume .
-const CloudVolumeCreatedForVolumeNameTag = "kubernetes.io/created-for/pv/name"
-
 // Number of retries when we create a PV object for a provisioned volume.
 const createProvisionedPVRetryCount = 5
 
@@ -168,10 +154,8 @@ type PersistentVolumeController struct {
 	kubeClient                clientset.Interface
 	eventBroadcaster          record.EventBroadcaster
 	eventRecorder             record.EventRecorder
-	cloud                     cloudprovider.Interface
 	volumePluginMgr           vol.VolumePluginMgr
 	enableDynamicProvisioning bool
-	clusterName               string
 	resyncPeriod              time.Duration
 
 	// Cache of the last known version of volumes and claims. This cache is
@@ -203,8 +187,8 @@ type PersistentVolumeController struct {
 	// version errors in API server and other checks in this controller),
 	// however overall speed of multi-worker controller would be lower than if
 	// it runs single thread only.
-	claimQueue  *workqueue.Type
-	volumeQueue *workqueue.Type
+	claimQueue  *workqueue.Typed[string]
+	volumeQueue *workqueue.Typed[string]
 
 	// Map of scheduled/running operations.
 	runningOperations goroutinemap.GoRoutineMap
@@ -240,9 +224,6 @@ type PersistentVolumeController struct {
 
 	translator               CSINameTranslator
 	csiMigratedPluginManager CSIMigratedPluginManager
-
-	// filteredDialOptions configures any dialing done by the controller.
-	filteredDialOptions *proxyutil.FilteredDialOptions
 }
 
 // syncClaim is the main controller method to decide what to do with a claim.
@@ -350,29 +331,32 @@ func (ctrl *PersistentVolumeController) syncUnboundClaim(ctx context.Context, cl
 		}
 		if volume == nil {
 			logger.V(4).Info("Synchronizing unbound PersistentVolumeClaim, no volume found", "PVC", klog.KObj(claim))
-			// No PV could be found
+			// No PV could be found. Try to provision one if possible.
 			// OBSERVATION: pvc is "Pending", will retry
 
-			if utilfeature.DefaultFeatureGate.Enabled(features.RetroactiveDefaultStorageClass) {
-				logger.V(4).Info("FeatureGate is enabled, attempting to assign storage class to unbound PersistentVolumeClaim", "featureGate", features.RetroactiveDefaultStorageClass, "PVC", klog.KObj(claim))
-				updated, err := ctrl.assignDefaultStorageClass(ctx, claim)
-				if err != nil {
-					metrics.RecordRetroactiveStorageClassMetric(false)
-					return fmt.Errorf("can't update PersistentVolumeClaim[%q]: %w", claimToClaimKey(claim), err)
-				}
-				if updated {
-					logger.V(4).Info("PersistentVolumeClaim update successful, restarting claim sync", "PVC", klog.KObj(claim))
-					metrics.RecordRetroactiveStorageClassMetric(true)
-					return nil
-				}
+			logger.V(4).Info("Attempting to assign storage class to unbound PersistentVolumeClaim", "PVC", klog.KObj(claim))
+			updated, err := ctrl.assignDefaultStorageClass(ctx, claim)
+			if err != nil {
+				metrics.RecordRetroactiveStorageClassMetric(false)
+				return fmt.Errorf("can't update PersistentVolumeClaim[%q]: %w", claimToClaimKey(claim), err)
+			}
+			if updated {
+				logger.V(4).Info("PersistentVolumeClaim update successful, restarting claim sync", "PVC", klog.KObj(claim))
+				metrics.RecordRetroactiveStorageClassMetric(true)
+				return nil
 			}
 
 			switch {
 			case delayBinding && !storagehelpers.IsDelayBindingProvisioning(claim):
+				// Scheduler does not observe any pod using this claim.
 				if err = ctrl.emitEventForUnboundDelayBindingClaim(claim); err != nil {
 					return err
 				}
 			case storagehelpers.GetPersistentVolumeClaimClass(claim) != "":
+				// The provisionClaim function may start a new asynchronous operation to provision a volume,
+				// or the operation is already running. The claim will be updated in the asynchronous operation,
+				// so the branch should be returned directly and the bind operation is expected to continue in
+				// the next sync loop.
 				if err = ctrl.provisionClaim(ctx, claim); err != nil {
 					return err
 				}
@@ -949,16 +933,14 @@ func (ctrl *PersistentVolumeController) updateVolumePhaseWithEvent(ctx context.C
 func (ctrl *PersistentVolumeController) assignDefaultStorageClass(ctx context.Context, claim *v1.PersistentVolumeClaim) (bool, error) {
 	logger := klog.FromContext(ctx)
 
-	if storagehelpers.GetPersistentVolumeClaimClass(claim) != "" {
+	if storagehelpers.PersistentVolumeClaimHasClass(claim) {
+		// The user asked for a class.
 		return false, nil
 	}
 
 	class, err := util.GetDefaultClass(ctrl.classLister)
 	if err != nil {
-		// It is safe to ignore errors here because it means we either could not list SCs or there is more than one default.
-		// TODO: do not ignore errors after this PR is merged: https://github.com/kubernetes/kubernetes/pull/110559
-		logger.V(4).Info("Failed to get default storage class", "err", err)
-		return false, nil
+		return false, err
 	} else if class == nil {
 		logger.V(4).Info("Can not assign storage class to PersistentVolumeClaim: default storage class not found", "PVC", klog.KObj(claim))
 		return false, nil
@@ -1656,17 +1638,9 @@ func (ctrl *PersistentVolumeController) provisionClaimOperation(
 		return pluginName, err
 	}
 
-	// Gather provisioning options
-	tags := make(map[string]string)
-	tags[CloudVolumeCreatedForClaimNamespaceTag] = claim.Namespace
-	tags[CloudVolumeCreatedForClaimNameTag] = claim.Name
-	tags[CloudVolumeCreatedForVolumeNameTag] = pvName
-
 	options := vol.VolumeOptions{
 		PersistentVolumeReclaimPolicy: *storageClass.ReclaimPolicy,
 		MountOptions:                  storageClass.MountOptions,
-		CloudTags:                     &tags,
-		ClusterName:                   ctrl.clusterName,
 		PVName:                        pvName,
 		PVC:                           claim,
 		Parameters:                    storageClass.Parameters,
@@ -1835,11 +1809,15 @@ func (ctrl *PersistentVolumeController) provisionClaimOperationExternal(
 	newClaim, err := ctrl.setClaimProvisioner(ctx, claim, provisionerName)
 	if err != nil {
 		// Save failed, the controller will retry in the next sync
+		strerr := fmt.Sprintf("Error saving claim: %v", err)
 		logger.V(2).Info("Error saving claim", "PVC", klog.KObj(claim), "err", err)
+		ctrl.eventRecorder.Event(claim, v1.EventTypeWarning, events.ProvisioningFailed, strerr)
 		return provisionerName, err
 	}
 	claim = newClaim
-	msg := fmt.Sprintf("waiting for a volume to be created, either by external provisioner %q or manually created by system administrator", provisionerName)
+	msg := fmt.Sprintf("Waiting for a volume to be created either by the external provisioner '%s' "+
+		"or manually by the system administrator. If volume creation is delayed, please verify that "+
+		"the provisioner is running and correctly registered.", provisionerName)
 	// External provisioner has been requested for provisioning the volume
 	// Report an event and wait for external provisioner to finish
 	ctrl.eventRecorder.Event(claim, v1.EventTypeNormal, events.ExternalProvisioning, msg)
@@ -1954,6 +1932,18 @@ func (ctrl *PersistentVolumeController) findDeletablePlugin(volume *v1.Persisten
 				return nil, err
 			}
 			return plugin, nil
+		}
+	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(features.HonorPVReclaimPolicy) {
+		if metav1.HasAnnotation(volume.ObjectMeta, storagehelpers.AnnMigratedTo) {
+			// CSI migration scenario - do not depend on in-tree plugin
+			return nil, nil
+		}
+
+		if volume.Spec.CSI != nil {
+			// CSI volume source scenario - external provisioner is requested
+			return nil, nil
 		}
 	}
 

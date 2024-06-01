@@ -35,7 +35,6 @@ import (
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
-	"k8s.io/kubernetes/cmd/kubeadm/app/features"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/addons/dns"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/addons/proxy"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/bootstraptoken/clusterinfo"
@@ -60,7 +59,7 @@ func PerformPostUpgradeTasks(client clientset.Interface, cfg *kubeadmapi.InitCon
 	}
 
 	// Create the new, version-branched kubelet ComponentConfig ConfigMap
-	if err := kubeletphase.CreateConfigMap(&cfg.ClusterConfiguration, patchesDir, client); err != nil {
+	if err := kubeletphase.CreateConfigMap(&cfg.ClusterConfiguration, client); err != nil {
 		errs = append(errs, errors.Wrap(err, "error creating kubelet configuration ConfigMap"))
 	}
 
@@ -106,7 +105,7 @@ func PerformPostUpgradeTasks(client clientset.Interface, cfg *kubeadmapi.InitCon
 		errs = append(errs, err)
 	}
 
-	if err := PerformAddonsUpgrade(client, cfg, out); err != nil {
+	if err := PerformAddonsUpgrade(client, cfg, patchesDir, out); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -114,29 +113,14 @@ func PerformPostUpgradeTasks(client clientset.Interface, cfg *kubeadmapi.InitCon
 }
 
 // PerformAddonsUpgrade performs the upgrade of the coredns and kube-proxy addons.
-// When UpgradeAddonsBeforeControlPlane feature gate is enabled, the addons will be upgraded immediately.
-// When UpgradeAddonsBeforeControlPlane feature gate is disabled, the addons will only get updated after all the control plane instances have been upgraded.
-func PerformAddonsUpgrade(client clientset.Interface, cfg *kubeadmapi.InitConfiguration, out io.Writer) error {
+func PerformAddonsUpgrade(client clientset.Interface, cfg *kubeadmapi.InitConfiguration, patchesDir string, out io.Writer) error {
 	unupgradedControlPlanes, err := unupgradedControlPlaneInstances(client, cfg.NodeRegistration.Name)
 	if err != nil {
-		err = errors.Wrapf(err, "failed to determine whether all the control plane instances have been upgraded")
-		if !features.Enabled(cfg.FeatureGates, features.UpgradeAddonsBeforeControlPlane) {
-			return err
-		}
-
-		// when UpgradeAddonsBeforeControlPlane feature gate is enabled, just throw a warning
-		klog.V(1).Info(err)
+		return errors.Wrapf(err, "failed to determine whether all the control plane instances have been upgraded")
 	}
 	if len(unupgradedControlPlanes) > 0 {
-		if !features.Enabled(cfg.FeatureGates, features.UpgradeAddonsBeforeControlPlane) {
-			fmt.Fprintf(out, "[upgrade/addons] skip upgrade addons because control plane instances %v have not been upgraded\n", unupgradedControlPlanes)
-			return nil
-		}
-
-		// when UpgradeAddonsBeforeControlPlane feature gate is enabled, just throw a warning
-		klog.V(1).Infof("upgrading addons when control plane instances %v have not been upgraded "+
-			"may lead to incompatibility problems. You can disable the UpgradeAddonsBeforeControlPlane feature gate to"+
-			"ensure that the addons upgrade is executed only when all the control plane instances have been upgraded.", unupgradedControlPlanes)
+		fmt.Fprintf(out, "[upgrade/addons] skip upgrade addons because control plane instances %v have not been upgraded\n", unupgradedControlPlanes)
+		return nil
 	}
 
 	var errs []error
@@ -163,7 +147,7 @@ func PerformAddonsUpgrade(client clientset.Interface, cfg *kubeadmapi.InitConfig
 			metav1.NamespaceSystem)
 	} else {
 		// Upgrade CoreDNS
-		if err := dns.EnsureDNSAddon(&cfg.ClusterConfiguration, client, out, false); err != nil {
+		if err := dns.EnsureDNSAddon(&cfg.ClusterConfiguration, client, patchesDir, out, false); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -248,6 +232,7 @@ func unupgradedControlPlaneInstances(client clientset.Interface, nodeName string
 	return nil, nil
 }
 
+// WriteKubeletConfigFiles writes the kubelet config file to disk, but first creates a backup of any existing one.
 func WriteKubeletConfigFiles(cfg *kubeadmapi.InitConfiguration, patchesDir string, dryRun bool, out io.Writer) error {
 	// Set up the kubelet directory to use. If dry-running, this will return a fake directory
 	kubeletDir, err := GetKubeletDir(dryRun)
@@ -265,14 +250,10 @@ func WriteKubeletConfigFiles(cfg *kubeadmapi.InitConfiguration, patchesDir strin
 	dest := filepath.Join(backupDir, kubeadmconstants.KubeletConfigurationFileName)
 
 	if !dryRun {
-		// call `cp` instead of `rename` here since the kubelet config file and back up directory (/etc/kubernetes/tmp/)
-		// might on the filesystem with different mount points in the test environment, such as kinder.
-		// This will lead to a failure to move the file from the source to dest since `rename` normally doesn't work
-		// across different mount points on most Unix system.
 		fmt.Printf("[upgrade] Backing up kubelet config file to %s\n", dest)
-		output, err := kubeadmutil.CopyDir(src, dest)
+		err := kubeadmutil.CopyFile(src, dest)
 		if err != nil {
-			return errors.Wrapf(err, "error backing up the kubelet config file, output: %q", output)
+			return errors.Wrap(err, "error backing up the kubelet config file")
 		}
 	} else {
 		fmt.Printf("[dryrun] Would back up kubelet config file to %s\n", dest)
@@ -299,27 +280,4 @@ func GetKubeletDir(dryRun bool) (string, error) {
 		return kubeadmconstants.CreateTempDirForKubeadm("", "kubeadm-upgrade-dryrun")
 	}
 	return kubeadmconstants.KubeletRunDirectory, nil
-}
-
-// moveFiles moves files from one directory to another.
-func moveFiles(files map[string]string) error {
-	filesToRecover := make(map[string]string, len(files))
-	for from, to := range files {
-		if err := os.Rename(from, to); err != nil {
-			return rollbackFiles(filesToRecover, err)
-		}
-		filesToRecover[to] = from
-	}
-	return nil
-}
-
-// rollbackFiles moves the files back to the original directory.
-func rollbackFiles(files map[string]string, originalErr error) error {
-	errs := []error{originalErr}
-	for from, to := range files {
-		if err := os.Rename(from, to); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Errorf("couldn't move these files: %v. Got errors: %v", files, errorsutil.NewAggregate(errs))
 }

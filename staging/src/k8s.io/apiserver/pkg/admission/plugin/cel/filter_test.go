@@ -28,6 +28,8 @@ import (
 	celtypes "github.com/google/cel-go/common/types"
 	"github.com/stretchr/testify/require"
 
+	"k8s.io/utils/pointer"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -38,7 +40,7 @@ import (
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	apiservercel "k8s.io/apiserver/pkg/cel"
-	"k8s.io/utils/pointer"
+	"k8s.io/apiserver/pkg/cel/environment"
 )
 
 type condition struct {
@@ -91,8 +93,8 @@ func TestCompile(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var c filterCompiler
-			e := c.Compile(tc.validation, OptionalVariableDeclarations{HasParams: false, HasAuthorizer: false}, celconfig.PerCallLimit)
+			c := filterCompiler{compiler: NewCompiler(environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion(), true))}
+			e := c.Compile(tc.validation, OptionalVariableDeclarations{HasParams: false, HasAuthorizer: false, StrictCost: true}, environment.NewExpressions)
 			if e == nil {
 				t.Fatalf("unexpected nil validator")
 			}
@@ -147,6 +149,28 @@ func TestFilter(t *testing.T) {
 		},
 	}
 
+	nsObject := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test",
+			Labels: map[string]string{
+				"env": "test",
+				"foo": "demo",
+			},
+			Annotations: map[string]string{
+				"annotation1": "testAnnotation1",
+			},
+			Finalizers: []string{"f1"},
+		},
+		Spec: corev1.NamespaceSpec{
+			Finalizers: []corev1.FinalizerName{
+				corev1.FinalizerKubernetes,
+			},
+		},
+		Status: corev1.NamespaceStatus{
+			Phase: corev1.NamespaceActive,
+		},
+	}
+
 	var nilUnstructured *unstructured.Unstructured
 	cases := []struct {
 		name             string
@@ -157,6 +181,8 @@ func TestFilter(t *testing.T) {
 		hasParamKind     bool
 		authorizer       authorizer.Authorizer
 		testPerCallLimit uint64
+		namespaceObject  *corev1.Namespace
+		strictCost       bool
 	}{
 		{
 			name: "valid syntax for object",
@@ -436,11 +462,17 @@ func TestFilter(t *testing.T) {
 				&condition{
 					Expression: "authorizer.group('').resource('endpoints').check('create').allowed()",
 				},
+				&condition{
+					Expression: "authorizer.group('').resource('endpoints').check('create').errored()",
+				},
 			},
 			attributes: newValidAttribute(&podObject, false),
 			results: []EvaluationResult{
 				{
 					EvalResult: celtypes.True,
+				},
+				{
+					EvalResult: celtypes.False,
 				},
 			},
 			authorizer: newAuthzAllowMatch(authorizer.AttributesRecord{
@@ -513,6 +545,33 @@ func TestFilter(t *testing.T) {
 				},
 			},
 			authorizer: denyAll,
+		},
+		{
+			name: "test authorizer error",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "authorizer.group('').resource('endpoints').check('create').errored()",
+				},
+				&condition{
+					Expression: "authorizer.group('').resource('endpoints').check('create').error() == 'fake authz error'",
+				},
+				&condition{
+					Expression: "authorizer.group('').resource('endpoints').check('create').allowed()",
+				},
+			},
+			attributes: newValidAttribute(&podObject, false),
+			results: []EvaluationResult{
+				{
+					EvalResult: celtypes.True,
+				},
+				{
+					EvalResult: celtypes.True,
+				},
+				{
+					EvalResult: celtypes.False,
+				},
+			},
+			authorizer: errorAll,
 		},
 		{
 			name: "test authorizer allow path check",
@@ -639,15 +698,82 @@ func TestFilter(t *testing.T) {
 			params:           crdParams,
 			testPerCallLimit: 1,
 		},
+		{
+			name: "test namespaceObject",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "namespaceObject.metadata.name == 'test'",
+				},
+				&condition{
+					Expression: "'env' in namespaceObject.metadata.labels && namespaceObject.metadata.labels.env == 'test'",
+				},
+				&condition{
+					Expression: "('fake' in namespaceObject.metadata.labels) && namespaceObject.metadata.labels.fake == 'test'",
+				},
+				&condition{
+					Expression: "namespaceObject.spec.finalizers[0] == 'kubernetes'",
+				},
+				&condition{
+					Expression: "namespaceObject.status.phase == 'Active'",
+				},
+				&condition{
+					Expression: "size(namespaceObject.metadata.managedFields) == 1",
+				},
+				&condition{
+					Expression: "size(namespaceObject.metadata.ownerReferences) == 1",
+				},
+				&condition{
+					Expression: "'env' in namespaceObject.metadata.annotations",
+				},
+			},
+			attributes: newValidAttribute(&podObject, false),
+			results: []EvaluationResult{
+				{
+					EvalResult: celtypes.True,
+				},
+				{
+					EvalResult: celtypes.True,
+				},
+				{
+					EvalResult: celtypes.False,
+				},
+				{
+					EvalResult: celtypes.True,
+				},
+				{
+					EvalResult: celtypes.True,
+				},
+				{
+					Error: errors.New("undefined field 'managedFields'"),
+				},
+				{
+					Error: errors.New("undefined field 'ownerReferences'"),
+				},
+				{
+					EvalResult: celtypes.False,
+				},
+			},
+			hasParamKind:    false,
+			namespaceObject: nsObject,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := filterCompiler{}
 			if tc.testPerCallLimit == 0 {
 				tc.testPerCallLimit = celconfig.PerCallLimit
 			}
-			f := c.Compile(tc.validations, OptionalVariableDeclarations{HasParams: tc.hasParamKind, HasAuthorizer: tc.authorizer != nil}, tc.testPerCallLimit)
+			env, err := environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion(), tc.strictCost).Extend(
+				environment.VersionedOptions{
+					IntroducedVersion: environment.DefaultCompatibilityVersion(),
+					ProgramOptions:    []celgo.ProgramOption{celgo.CostLimit(tc.testPerCallLimit)},
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := NewFilterCompiler(env)
+			f := c.Compile(tc.validations, OptionalVariableDeclarations{HasParams: tc.hasParamKind, HasAuthorizer: tc.authorizer != nil, StrictCost: tc.strictCost}, environment.NewExpressions)
 			if f == nil {
 				t.Fatalf("unexpected nil validator")
 			}
@@ -662,7 +788,7 @@ func TestFilter(t *testing.T) {
 
 			optionalVars := OptionalVariableBindings{VersionedParams: tc.params, Authorizer: tc.authorizer}
 			ctx := context.TODO()
-			evalResults, _, err := f.ForInput(ctx, versionedAttr, CreateAdmissionRequest(versionedAttr.Attributes), optionalVars, celconfig.RuntimeCELCostBudget)
+			evalResults, _, err := f.ForInput(ctx, versionedAttr, CreateAdmissionRequest(versionedAttr.Attributes, metav1.GroupVersionResource(versionedAttr.GetResource()), metav1.GroupVersionKind(versionedAttr.VersionedKind)), optionalVars, CreateNamespaceObject(tc.namespaceObject), celconfig.RuntimeCELCostBudget)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -690,15 +816,17 @@ func TestRuntimeCELCostBudget(t *testing.T) {
 	}
 
 	cases := []struct {
-		name                     string
-		attributes               admission.Attributes
-		params                   runtime.Object
-		validations              []ExpressionAccessor
-		hasParamKind             bool
-		authorizer               authorizer.Authorizer
-		testRuntimeCELCostBudget int64
-		exceedBudget             bool
-		expectRemainingBudget    *int64
+		name                        string
+		attributes                  admission.Attributes
+		params                      runtime.Object
+		validations                 []ExpressionAccessor
+		hasParamKind                bool
+		authorizer                  authorizer.Authorizer
+		testRuntimeCELCostBudget    int64
+		exceedBudget                bool
+		expectRemainingBudget       *int64
+		enableStrictCostEnforcement bool
+		exceedPerCallLimit          bool
 	}{
 		{
 			name: "expression exceed RuntimeCELCostBudget at fist expression",
@@ -785,12 +913,275 @@ func TestRuntimeCELCostBudget(t *testing.T) {
 			testRuntimeCELCostBudget: 6,
 			expectRemainingBudget:    pointer.Int64(0),
 		},
+		{
+			name: "Extended library cost: authz check",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "!authorizer.group('').resource('endpoints').check('create').allowed()",
+				},
+			},
+			attributes:               newValidAttribute(nil, false),
+			hasParamKind:             false,
+			exceedBudget:             false,
+			testRuntimeCELCostBudget: 6,
+			expectRemainingBudget:    pointer.Int64(0),
+			authorizer:               denyAll,
+		},
+		{
+			name: "Extended library cost: isSorted()",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "[1,2,3,4].isSorted()",
+				},
+			},
+			attributes:               newValidAttribute(nil, false),
+			hasParamKind:             false,
+			exceedBudget:             false,
+			testRuntimeCELCostBudget: 1,
+			expectRemainingBudget:    pointer.Int64(0),
+		},
+		{
+			name: "Extended library cost: url",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "url('https:://kubernetes.io/').getHostname() == 'kubernetes.io'",
+				},
+			},
+			attributes:               newValidAttribute(nil, false),
+			hasParamKind:             false,
+			exceedBudget:             false,
+			testRuntimeCELCostBudget: 2,
+			expectRemainingBudget:    pointer.Int64(0),
+		},
+		{
+			name: "Extended library cost: split",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "size('abc 123 def 123'.split(' ')) > 0",
+				},
+			},
+			attributes:               newValidAttribute(nil, false),
+			hasParamKind:             false,
+			exceedBudget:             false,
+			testRuntimeCELCostBudget: 3,
+			expectRemainingBudget:    pointer.Int64(0),
+		},
+		{
+			name: "Extended library cost: join",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "size(['aa', 'bb', 'cc', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].join(' ')) > 0",
+				},
+			},
+			attributes:               newValidAttribute(nil, false),
+			hasParamKind:             false,
+			exceedBudget:             false,
+			testRuntimeCELCostBudget: 3,
+			expectRemainingBudget:    pointer.Int64(0),
+		},
+		{
+			name: "Extended library cost: find",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "size('abc 123 def 123'.find('123')) > 0",
+				},
+			},
+			attributes:               newValidAttribute(nil, false),
+			hasParamKind:             false,
+			exceedBudget:             false,
+			testRuntimeCELCostBudget: 3,
+			expectRemainingBudget:    pointer.Int64(0),
+		},
+		{
+			name: "Extended library cost: quantity",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "quantity(\"200M\") == quantity(\"0.2G\") && quantity(\"0.2G\") == quantity(\"200M\")",
+				},
+			},
+			attributes:               newValidAttribute(nil, false),
+			hasParamKind:             false,
+			exceedBudget:             false,
+			testRuntimeCELCostBudget: 6,
+			expectRemainingBudget:    pointer.Int64(0),
+		},
+		{
+			name: "With StrictCostEnforcementForVAP enabled: expression exceed RuntimeCELCostBudget at fist expression",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "!authorizer.group('').resource('endpoints').check('create').allowed()",
+				},
+				&condition{
+					Expression: "has(object.subsets)",
+				},
+			},
+			attributes:                  newValidAttribute(nil, false),
+			hasParamKind:                false,
+			testRuntimeCELCostBudget:    35000,
+			exceedBudget:                true,
+			authorizer:                  denyAll,
+			enableStrictCostEnforcement: true,
+		},
+		{
+			name: "With StrictCostEnforcementForVAP enabled: expression exceed RuntimeCELCostBudget at last expression",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "!authorizer.group('').resource('endpoints').check('create').allowed()",
+				},
+				&condition{
+					Expression: "!authorizer.group('').resource('endpoints').check('create').allowed()",
+				},
+			},
+			attributes:                  newValidAttribute(nil, false),
+			hasParamKind:                false,
+			testRuntimeCELCostBudget:    700000,
+			exceedBudget:                true,
+			authorizer:                  denyAll,
+			enableStrictCostEnforcement: true,
+		},
+		{
+			name: "With StrictCostEnforcementForVAP enabled: test RuntimeCELCostBudge is not exceed",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "!authorizer.group('').resource('endpoints').check('create').allowed()",
+				},
+				&condition{
+					Expression: "!authorizer.group('').resource('endpoints').check('create').allowed()",
+				},
+			},
+			attributes:                  newValidAttribute(nil, false),
+			hasParamKind:                true,
+			params:                      configMapParams,
+			exceedBudget:                false,
+			testRuntimeCELCostBudget:    700011,
+			expectRemainingBudget:       pointer.Int64(1), // 700011 - 700010
+			authorizer:                  denyAll,
+			enableStrictCostEnforcement: true,
+		},
+		{
+			name: "With StrictCostEnforcementForVAP enabled: test RuntimeCELCostBudge exactly covers",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "!authorizer.group('').resource('endpoints').check('create').allowed()",
+				},
+				&condition{
+					Expression: "!authorizer.group('').resource('endpoints').check('create').allowed()",
+				},
+			},
+			attributes:                  newValidAttribute(nil, false),
+			hasParamKind:                true,
+			params:                      configMapParams,
+			exceedBudget:                false,
+			testRuntimeCELCostBudget:    700010,
+			expectRemainingBudget:       pointer.Int64(0),
+			authorizer:                  denyAll,
+			enableStrictCostEnforcement: true,
+		},
+		{
+			name: "With StrictCostEnforcementForVAP enabled: per call limit exceeds",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "!authorizer.group('').resource('endpoints').check('create').allowed() && !authorizer.group('').resource('endpoints').check('create').allowed() && !authorizer.group('').resource('endpoints').check('create').allowed()",
+				},
+			},
+			attributes:                  newValidAttribute(nil, false),
+			hasParamKind:                true,
+			params:                      configMapParams,
+			authorizer:                  denyAll,
+			exceedPerCallLimit:          true,
+			testRuntimeCELCostBudget:    -1,
+			enableStrictCostEnforcement: true,
+		},
+		{
+			name: "With StrictCostEnforcementForVAP enabled: Extended library cost: isSorted()",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "[1,2,3,4].isSorted()",
+				},
+			},
+			attributes:                  newValidAttribute(nil, false),
+			hasParamKind:                false,
+			exceedBudget:                false,
+			testRuntimeCELCostBudget:    4,
+			expectRemainingBudget:       pointer.Int64(0),
+			enableStrictCostEnforcement: true,
+		},
+		{
+			name: "With StrictCostEnforcementForVAP enabled: Extended library cost: url",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "url('https:://kubernetes.io/').getHostname() == 'kubernetes.io'",
+				},
+			},
+			attributes:                  newValidAttribute(nil, false),
+			hasParamKind:                false,
+			exceedBudget:                false,
+			testRuntimeCELCostBudget:    4,
+			expectRemainingBudget:       pointer.Int64(0),
+			enableStrictCostEnforcement: true,
+		},
+		{
+			name: "With StrictCostEnforcementForVAP enabled: Extended library cost: split",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "size('abc 123 def 123'.split(' ')) > 0",
+				},
+			},
+			attributes:                  newValidAttribute(nil, false),
+			hasParamKind:                false,
+			exceedBudget:                false,
+			testRuntimeCELCostBudget:    5,
+			expectRemainingBudget:       pointer.Int64(0),
+			enableStrictCostEnforcement: true,
+		},
+		{
+			name: "With StrictCostEnforcementForVAP enabled: Extended library cost: join",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "size(['aa', 'bb', 'cc', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].join(' ')) > 0",
+				},
+			},
+			attributes:                  newValidAttribute(nil, false),
+			hasParamKind:                false,
+			exceedBudget:                false,
+			testRuntimeCELCostBudget:    7,
+			expectRemainingBudget:       pointer.Int64(0),
+			enableStrictCostEnforcement: true,
+		},
+		{
+			name: "With StrictCostEnforcementForVAP enabled: Extended library cost: find",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "size('abc 123 def 123'.find('123')) > 0",
+				},
+			},
+			attributes:                  newValidAttribute(nil, false),
+			hasParamKind:                false,
+			exceedBudget:                false,
+			testRuntimeCELCostBudget:    4,
+			expectRemainingBudget:       pointer.Int64(0),
+			enableStrictCostEnforcement: true,
+		},
+		{
+			name: "With StrictCostEnforcementForVAP enabled: Extended library cost: quantity",
+			validations: []ExpressionAccessor{
+				&condition{
+					Expression: "quantity(\"200M\") == quantity(\"0.2G\") && quantity(\"0.2G\") == quantity(\"200M\")",
+				},
+			},
+			attributes:                  newValidAttribute(nil, false),
+			hasParamKind:                false,
+			exceedBudget:                false,
+			testRuntimeCELCostBudget:    6,
+			expectRemainingBudget:       pointer.Int64(0),
+			enableStrictCostEnforcement: true,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := filterCompiler{}
-			f := c.Compile(tc.validations, OptionalVariableDeclarations{HasParams: tc.hasParamKind, HasAuthorizer: false}, celconfig.PerCallLimit)
+			c := filterCompiler{compiler: NewCompiler(environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion(), tc.enableStrictCostEnforcement))}
+			f := c.Compile(tc.validations, OptionalVariableDeclarations{HasParams: tc.hasParamKind, HasAuthorizer: true, StrictCost: tc.enableStrictCostEnforcement}, environment.NewExpressions)
 			if f == nil {
 				t.Fatalf("unexpected nil validator")
 			}
@@ -803,16 +1194,28 @@ func TestRuntimeCELCostBudget(t *testing.T) {
 				t.Fatalf("unexpected error on conversion: %v", err)
 			}
 
-			if tc.testRuntimeCELCostBudget == 0 {
+			if tc.testRuntimeCELCostBudget < 0 {
 				tc.testRuntimeCELCostBudget = celconfig.RuntimeCELCostBudget
 			}
 			optionalVars := OptionalVariableBindings{VersionedParams: tc.params, Authorizer: tc.authorizer}
 			ctx := context.TODO()
-			evalResults, remaining, err := f.ForInput(ctx, versionedAttr, CreateAdmissionRequest(versionedAttr.Attributes), optionalVars, tc.testRuntimeCELCostBudget)
+			evalResults, remaining, err := f.ForInput(ctx, versionedAttr, CreateAdmissionRequest(versionedAttr.Attributes, metav1.GroupVersionResource(versionedAttr.GetResource()), metav1.GroupVersionKind(versionedAttr.VersionedKind)), optionalVars, nil, tc.testRuntimeCELCostBudget)
+			if tc.exceedPerCallLimit {
+				hasCostErr := false
+				for _, evalResult := range evalResults {
+					if evalResult.Error != nil && strings.Contains(evalResult.Error.Error(), "operation cancelled: actual cost limit exceeded") {
+						hasCostErr = true
+						break
+					}
+				}
+				if !hasCostErr {
+					t.Errorf("Expected per call limit exceeded error but didn't get one")
+				}
+			}
 			if tc.exceedBudget && err == nil {
 				t.Errorf("Expected RuntimeCELCostBudge to be exceeded but got nil")
 			}
-			if tc.exceedBudget && !strings.Contains(err.Error(), "validation failed due to running out of cost budget, no further validation rules will be run") {
+			if tc.exceedBudget && err != nil && !strings.Contains(err.Error(), "validation failed due to running out of cost budget, no further validation rules will be run") {
 				t.Errorf("Expected RuntimeCELCostBudge exceeded error but got: %v", err)
 			}
 			if err != nil && remaining != -1 {
@@ -963,6 +1366,7 @@ func TestCompilationErrors(t *testing.T) {
 }
 
 var denyAll = fakeAuthorizer{defaultResult: authorizerResult{decision: authorizer.DecisionDeny, reason: "fake reason", err: nil}}
+var errorAll = fakeAuthorizer{defaultResult: authorizerResult{decision: authorizer.DecisionNoOpinion, reason: "", err: fmt.Errorf("fake authz error")}}
 
 func newAuthzAllowMatch(match authorizer.AttributesRecord) fakeAuthorizer {
 	return fakeAuthorizer{

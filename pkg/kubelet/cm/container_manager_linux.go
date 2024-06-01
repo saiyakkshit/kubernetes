@@ -20,12 +20,10 @@ limitations under the License.
 package cm
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path"
-	"strings"
 	"sync"
 	"time"
 
@@ -36,7 +34,6 @@ import (
 	"k8s.io/mount-utils"
 	utilpath "k8s.io/utils/path"
 
-	libcontaineruserns "github.com/opencontainers/runc/libcontainer/userns"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
@@ -51,7 +48,6 @@ import (
 	podresourcesapi "k8s.io/kubelet/pkg/apis/podresources/v1"
 	kubefeatures "k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/cadvisor"
-	"k8s.io/kubernetes/pkg/kubelet/cm/containermap"
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager"
 	"k8s.io/kubernetes/pkg/kubelet/cm/devicemanager"
 	"k8s.io/kubernetes/pkg/kubelet/cm/dra"
@@ -61,10 +57,13 @@ import (
 	cmutil "k8s.io/kubernetes/pkg/kubelet/cm/util"
 	"k8s.io/kubernetes/pkg/kubelet/config"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
+	"k8s.io/kubernetes/pkg/kubelet/events"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/pluginmanager/cache"
 	"k8s.io/kubernetes/pkg/kubelet/stats/pidlimit"
 	"k8s.io/kubernetes/pkg/kubelet/status"
+	"k8s.io/kubernetes/pkg/kubelet/userns/inuserns"
+	"k8s.io/kubernetes/pkg/kubelet/util/swap"
 	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/util/oom"
 )
@@ -162,7 +161,7 @@ func validateSystemRequirements(mountUtil mount.Interface) (features, error) {
 		return f, nil
 	}
 
-	expectedCgroups := sets.NewString("cpu", "cpuacct", "cpuset", "memory")
+	expectedCgroups := sets.New("cpu", "cpuacct", "cpuset", "memory")
 	for _, mountPoint := range mountPoints {
 		if mountPoint.Type == cgroupMountType {
 			for _, opt := range mountPoint.Opts {
@@ -177,7 +176,7 @@ func validateSystemRequirements(mountUtil mount.Interface) (features, error) {
 	}
 
 	if expectedCgroups.Len() > 0 {
-		return f, fmt.Errorf("%s - Following Cgroup subsystem not mounted: %v", localErr, expectedCgroups.List())
+		return f, fmt.Errorf("%s - Following Cgroup subsystem not mounted: %v", localErr, sets.List(expectedCgroups))
 	}
 
 	// Check if cpu quota is available.
@@ -205,25 +204,22 @@ func NewContainerManager(mountUtil mount.Interface, cadvisorInterface cadvisor.I
 		return nil, fmt.Errorf("failed to get mounted cgroup subsystems: %v", err)
 	}
 
-	if failSwapOn {
-		// Check whether swap is enabled. The Kubelet does not support running with swap enabled.
-		swapFile := "/proc/swaps"
-		swapData, err := os.ReadFile(swapFile)
-		if err != nil {
-			if os.IsNotExist(err) {
-				klog.InfoS("File does not exist, assuming that swap is disabled", "path", swapFile)
-			} else {
-				return nil, err
-			}
-		} else {
-			swapData = bytes.TrimSpace(swapData) // extra trailing \n
-			swapLines := strings.Split(string(swapData), "\n")
+	isSwapOn, err := swap.IsSwapOn()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine if swap is on: %w", err)
+	}
 
-			// If there is more than one line (table headers) in /proc/swaps, swap is enabled and we should
-			// error out unless --fail-swap-on is set to false.
-			if len(swapLines) > 1 {
-				return nil, fmt.Errorf("running with swap on is not supported, please disable swap! or set --fail-swap-on flag to false. /proc/swaps contained: %v", swapLines)
-			}
+	if isSwapOn {
+		if failSwapOn {
+			return nil, fmt.Errorf("running with swap on is not supported, please disable swap or set --fail-swap-on flag to false")
+		}
+
+		if !swap.IsTmpfsNoswapOptionSupported(mountUtil, nodeConfig.KubeletRootDir) {
+			nodeRef := nodeRefFromNode(string(nodeConfig.NodeName))
+			recorder.Event(nodeRef, v1.EventTypeWarning, events.PossibleMemoryBackedVolumesOnDisk,
+				"The tmpfs noswap option is not supported. Memory-backed volumes (e.g. secrets, emptyDirs, etc.) "+
+					"might be swapped to disk and should no longer be considered secure.",
+			)
 		}
 	}
 
@@ -292,7 +288,7 @@ func NewContainerManager(mountUtil mount.Interface, cadvisorInterface cadvisor.I
 		machineInfo.Topology,
 		nodeConfig.TopologyManagerPolicy,
 		nodeConfig.TopologyManagerScope,
-		nodeConfig.ExperimentalTopologyManagerPolicyOptions,
+		nodeConfig.TopologyManagerPolicyOptions,
 	)
 
 	if err != nil {
@@ -306,10 +302,10 @@ func NewContainerManager(mountUtil mount.Interface, cadvisorInterface cadvisor.I
 	}
 	cm.topologyManager.AddHintProvider(cm.deviceManager)
 
-	// initialize DRA manager
+	// Initialize DRA manager
 	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.DynamicResourceAllocation) {
 		klog.InfoS("Creating Dynamic Resource Allocation (DRA) manager")
-		cm.draManager, err = dra.NewManagerImpl(kubeClient, nodeConfig.KubeletRootDir)
+		cm.draManager, err = dra.NewManagerImpl(kubeClient, nodeConfig.KubeletRootDir, nodeConfig.NodeName)
 		if err != nil {
 			return nil, err
 		}
@@ -432,7 +428,7 @@ func setupKernelTunables(option KernelTunableBehavior) error {
 			klog.V(2).InfoS("Updating kernel flag", "flag", flag, "expectedValue", expectedValue, "actualValue", val)
 			err = sysctl.SetSysctl(flag, expectedValue)
 			if err != nil {
-				if libcontaineruserns.RunningInUserNS() {
+				if inuserns.RunningInUserNS() {
 					if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.KubeletInUserNamespace) {
 						klog.V(2).InfoS("Updating kernel flag failed (running in UserNS, ignoring)", "flag", flag, "err", err)
 						continue
@@ -563,8 +559,17 @@ func (cm *containerManagerImpl) Start(node *v1.Node,
 	localStorageCapacityIsolation bool) error {
 	ctx := context.Background()
 
+	containerMap, containerRunningSet := buildContainerMapAndRunningSetFromRuntime(ctx, runtimeService)
+
+	// Initialize DRA manager
+	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.DynamicResourceAllocation) {
+		err := cm.draManager.Start(dra.ActivePodsFunc(activePods), sourcesReady)
+		if err != nil {
+			return fmt.Errorf("start dra manager error: %w", err)
+		}
+	}
+
 	// Initialize CPU manager
-	containerMap := buildContainerMapFromRuntime(ctx, runtimeService)
 	err := cm.cpuManager.Start(cpumanager.ActivePodsFunc(activePods), sourcesReady, podStatusProvider, runtimeService, containerMap)
 	if err != nil {
 		return fmt.Errorf("start cpu manager error: %v", err)
@@ -572,7 +577,7 @@ func (cm *containerManagerImpl) Start(node *v1.Node,
 
 	// Initialize memory manager
 	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.MemoryManager) {
-		containerMap := buildContainerMapFromRuntime(ctx, runtimeService)
+		containerMap, _ := buildContainerMapAndRunningSetFromRuntime(ctx, runtimeService)
 		err := cm.memoryManager.Start(memorymanager.ActivePodsFunc(activePods), sourcesReady, podStatusProvider, runtimeService, containerMap)
 		if err != nil {
 			return fmt.Errorf("start memory manager error: %v", err)
@@ -636,7 +641,7 @@ func (cm *containerManagerImpl) Start(node *v1.Node,
 	}
 
 	// Starts device manager.
-	if err := cm.deviceManager.Start(devicemanager.ActivePodsFunc(activePods), sourcesReady); err != nil {
+	if err := cm.deviceManager.Start(devicemanager.ActivePodsFunc(activePods), sourcesReady, containerMap, containerRunningSet); err != nil {
 		return err
 	}
 
@@ -673,6 +678,7 @@ func (cm *containerManagerImpl) GetResources(pod *v1.Pod, container *v1.Containe
 	opts.Mounts = append(opts.Mounts, devOpts.Mounts...)
 	opts.Envs = append(opts.Envs, devOpts.Envs...)
 	opts.Annotations = append(opts.Annotations, devOpts.Annotations...)
+	opts.CDIDevices = append(opts.CDIDevices, devOpts.CDIDevices...)
 	return opts, nil
 }
 
@@ -697,26 +703,6 @@ func (cm *containerManagerImpl) SystemCgroupsLimit() v1.ResourceList {
 			cpuLimit,
 			resource.DecimalSI),
 	}
-}
-
-func buildContainerMapFromRuntime(ctx context.Context, runtimeService internalapi.RuntimeService) containermap.ContainerMap {
-	podSandboxMap := make(map[string]string)
-	podSandboxList, _ := runtimeService.ListPodSandbox(ctx, nil)
-	for _, p := range podSandboxList {
-		podSandboxMap[p.Id] = p.Metadata.Uid
-	}
-
-	containerMap := containermap.NewContainerMap()
-	containerList, _ := runtimeService.ListContainers(ctx, nil)
-	for _, c := range containerList {
-		if _, exists := podSandboxMap[c.PodSandboxId]; !exists {
-			klog.InfoS("No PodSandBox found for the container", "podSandboxId", c.PodSandboxId, "containerName", c.Metadata.Name, "containerId", c.Id)
-			continue
-		}
-		containerMap.Add(podSandboxMap[c.PodSandboxId], c.Metadata.Name, c.Id)
-	}
-
-	return containerMap
 }
 
 func isProcessRunningInHost(pid int) (bool, error) {

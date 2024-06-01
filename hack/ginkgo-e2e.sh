@@ -32,7 +32,10 @@ e2e_test=$(kube::util::find-binary "e2e.test")
 # --- Setup some env vars.
 
 GINKGO_PARALLEL=${GINKGO_PARALLEL:-n} # set to 'y' to run tests in parallel
+GINKGO_SILENCE_SKIPS=${GINKGO_SILENCE_SKIPS:-y} # set to 'n' to see S character for each skipped test
+GINKGO_FORCE_NEWLINES=${GINKGO_FORCE_NEWLINES:-$( if [ "${CI:-false}" = "true" ]; then echo "y"; else echo "n"; fi )} # set to 'y' to print a newline after each S or o character
 CLOUD_CONFIG=${CLOUD_CONFIG:-""}
+
 
 # If 'y', Ginkgo's reporter will not use escape sequence to color output.
 #
@@ -134,8 +137,8 @@ fi
 # Some arguments (like --nodes) are only supported when using the CLI.
 # Those get set below when choosing the program.
 ginkgo_args=(
-  "--poll-progress-after=${GINKGO_POLL_PROGRESS_AFTER:-300s}"
-  "--poll-progress-interval=${GINKGO_POLL_PROGRESS_INTERVAL:-20s}"
+  "--poll-progress-after=${GINKGO_POLL_PROGRESS_AFTER:-60m}"
+  "--poll-progress-interval=${GINKGO_POLL_PROGRESS_INTERVAL:-5m}"
   "--source-root=${KUBE_ROOT}"
 )
 
@@ -149,7 +152,7 @@ if [[ -n "${CONFORMANCE_TEST_SKIP_REGEX:-}" ]]; then
 fi
 
 if [[ "${GINKGO_UNTIL_IT_FAILS:-}" == true ]]; then
-  ginkgo_args+=("--untilItFails=true")
+  ginkgo_args+=("--until-it-fails=true")
 fi
 
 FLAKE_ATTEMPTS=1
@@ -157,6 +160,14 @@ if [[ "${GINKGO_TOLERATE_FLAKES}" == "y" ]]; then
   FLAKE_ATTEMPTS=2
 fi
 ginkgo_args+=("--flake-attempts=${FLAKE_ATTEMPTS}")
+
+if [[ "${GINKGO_SILENCE_SKIPS}" == "y" ]]; then
+  ginkgo_args+=("--silence-skips")
+fi
+
+if [[ "${GINKGO_FORCE_NEWLINES}" == "y" ]]; then
+  ginkgo_args+=("--force-newlines")
+fi
 
 if [[ "${GINKGO_NO_COLOR}" == "y" ]]; then
   ginkgo_args+=("--no-color")

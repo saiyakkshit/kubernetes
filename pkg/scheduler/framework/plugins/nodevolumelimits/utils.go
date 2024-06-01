@@ -46,17 +46,11 @@ func isCSIMigrationOn(csiNode *storagev1.CSINode, pluginName string) bool {
 			return false
 		}
 	case csilibplugins.GCEPDInTreePluginName:
-		if !utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationGCE) {
-			return false
-		}
+		return true
 	case csilibplugins.AzureDiskInTreePluginName:
 		return true
 	case csilibplugins.CinderInTreePluginName:
 		return true
-	case csilibplugins.RBDVolumePluginName:
-		if !utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationRBD) {
-			return false
-		}
 	default:
 		return false
 	}

@@ -36,7 +36,7 @@ import (
 	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 	"k8s.io/kubernetes/pkg/scheduler/internal/cache"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 var cmpOpts = []cmp.Option{
@@ -68,7 +68,6 @@ func (p *criticalPaths) sort() {
 }
 
 func TestPreFilterState(t *testing.T) {
-
 	tests := []struct {
 		name                      string
 		pod                       *v1.Pod
@@ -77,7 +76,7 @@ func TestPreFilterState(t *testing.T) {
 		objs                      []runtime.Object
 		defaultConstraints        []v1.TopologySpreadConstraint
 		want                      *preFilterState
-		enableMinDomains          bool
+		wantPrefilterStatus       *framework.Status
 		enableNodeInclusionPolicy bool
 		enableMatchLabelKeys      bool
 	}{
@@ -103,6 +102,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 0}, {"zone2", 0}},
 				},
@@ -141,6 +141,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 2}, {"zone1", 3}},
 				},
@@ -179,6 +180,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 0}, {"zone1", 0}},
 				},
@@ -219,6 +221,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone3", 0}, {"zone2", 2}},
 				},
@@ -258,6 +261,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 1}, {"zone1", 2}},
 				},
@@ -307,6 +311,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 4},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 3}, {"zone2", 4}},
 					"node": {{"node-x", 0}, {"node-b", 1}},
@@ -362,6 +367,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 3}, {"zone2", 4}},
 					"node": {{"node-b", 1}, {"node-a", 2}},
@@ -409,6 +415,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 0}, {"zone1", 1}},
 					"node": {{"node-a", 0}, {"node-y", 0}},
@@ -461,6 +468,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 3}, {"zone2", 4}},
 					"node": {{"node-b", 0}, {"node-a", 1}},
@@ -515,6 +523,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 3}, {"zone2", 4}},
 					"node": {{"node-b", 1}, {"node-a", 2}},
@@ -558,6 +567,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": newCriticalPaths(),
 					"rack": newCriticalPaths(),
@@ -574,7 +584,7 @@ func TestPreFilterState(t *testing.T) {
 			objs: []runtime.Object{
 				&v1.Service{Spec: v1.ServiceSpec{Selector: map[string]string{"baz": "kep"}}},
 			},
-			want: &preFilterState{},
+			wantPrefilterStatus: framework.NewStatus(framework.Skip),
 		},
 		{
 			name: "default constraints and a service, but pod has constraints",
@@ -599,6 +609,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": newCriticalPaths(),
 				},
@@ -614,7 +625,7 @@ func TestPreFilterState(t *testing.T) {
 			objs: []runtime.Object{
 				&v1.Service{Spec: v1.ServiceSpec{Selector: map[string]string{"foo": "bar"}}},
 			},
-			want: &preFilterState{},
+			wantPrefilterStatus: framework.NewStatus(framework.Skip),
 		},
 		{
 			name: "TpKeyToDomainsNum is calculated when MinDomains is enabled",
@@ -637,7 +648,6 @@ func TestPreFilterState(t *testing.T) {
 				st.MakePod().Name("p-y3").Node("node-y").Label("foo", "").Obj(),
 				st.MakePod().Name("p-y4").Node("node-y").Label("foo", "").Obj(),
 			},
-			enableMinDomains: true,
 			want: &preFilterState{
 				Constraints: []topologySpreadConstraint{
 					{
@@ -703,6 +713,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-a", 1}, {"node-b", 2}},
 				},
@@ -741,6 +752,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-a", 1}, {"node-b", 2}},
 				},
@@ -779,6 +791,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-c", 0}, {"node-a", 1}},
 				},
@@ -818,6 +831,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-a", 1}, {"node-b", 2}},
 				},
@@ -856,6 +870,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-c", 0}, {"node-a", 1}},
 				},
@@ -894,6 +909,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-c", 0}, {"node-a", 1}},
 				},
@@ -932,6 +948,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-c", 0}, {"node-a", 1}},
 				},
@@ -970,6 +987,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyHonor,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-a", 1}, {"node-b", 2}},
 				},
@@ -1008,6 +1026,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyHonor,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-c", 0}, {"node-a", 1}},
 				},
@@ -1055,6 +1074,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 0}, {"zone2", 1}},
 					"node": {{"node-a", 0}, {"node-x", 1}},
@@ -1104,6 +1124,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 0}, {"zone2", 1}},
 					"node": {{"node-a", 0}, {"node-x", 1}},
@@ -1156,6 +1177,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 0}, {"zone2", 1}},
 					"node": {{"node-b", 0}, {"node-x", 1}},
@@ -1208,6 +1230,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyHonor,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 2}, {"zone2", 3}},
 					"node": {{"node-y", 1}, {"node-x", 2}},
@@ -1250,6 +1273,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 2}, {"zone1", 3}},
 				},
@@ -1289,6 +1313,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 1}, {"zone1", 1}},
 				},
@@ -1328,6 +1353,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 2}, {"zone1", 3}},
 				},
@@ -1367,6 +1393,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 0}, {"zone1", 0}},
 				},
@@ -1406,6 +1433,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 0}, {"zone1", 0}},
 				},
@@ -1444,6 +1472,7 @@ func TestPreFilterState(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 2}, {"zone1", 3}},
 				},
@@ -1453,6 +1482,14 @@ func TestPreFilterState(t *testing.T) {
 				},
 			},
 			enableMatchLabelKeys: true,
+		},
+		{
+			name: "skip if not specified",
+			pod:  st.MakePod().Name("p").Label("foo", "").Obj(),
+			nodes: []*v1.Node{
+				st.MakeNode().Name("node-a").Label("zone", "zone1").Label("node", "node-a").Obj(),
+			},
+			wantPrefilterStatus: framework.NewStatus(framework.Skip),
 		},
 	}
 	for _, tt := range tests {
@@ -1466,20 +1503,25 @@ func TestPreFilterState(t *testing.T) {
 			}
 
 			p := plugintesting.SetupPluginWithInformers(ctx, t, topologySpreadFunc, args, cache.NewSnapshot(tt.existingPods, tt.nodes), tt.objs)
-			p.(*PodTopologySpread).enableMinDomainsInPodTopologySpread = tt.enableMinDomains
 			p.(*PodTopologySpread).enableNodeInclusionPolicyInPodTopologySpread = tt.enableNodeInclusionPolicy
 			p.(*PodTopologySpread).enableMatchLabelKeysInPodTopologySpread = tt.enableMatchLabelKeys
 
 			cs := framework.NewCycleState()
-			if _, s := p.(*PodTopologySpread).PreFilter(ctx, cs, tt.pod); !s.IsSuccess() {
-				t.Fatal(s.AsError())
+			_, s := p.(*PodTopologySpread).PreFilter(ctx, cs, tt.pod)
+			if !tt.wantPrefilterStatus.Equal(s) {
+				t.Errorf("PodTopologySpread#PreFilter() returned unexpected status. got: %v, want: %v", s, tt.wantPrefilterStatus)
 			}
+
+			if !s.IsSuccess() {
+				return
+			}
+
 			got, err := getPreFilterState(cs)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("failed to get PreFilterState from cyclestate: %v", err)
 			}
 			if diff := cmp.Diff(tt.want, got, cmpOpts...); diff != "" {
-				t.Errorf("PodTopologySpread#PreFilter() returned diff (-want,+got):\n%s", diff)
+				t.Errorf("PodTopologySpread#PreFilter() returned unexpected prefilter status: diff (-want,+got):\n%s", diff)
 			}
 		})
 	}
@@ -1519,7 +1561,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone1").Label("node", "node-b").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{nodeConstraint},
+				Constraints:       []topologySpreadConstraint{nodeConstraint},
+				TpKeyToDomainsNum: map[string]int{"node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-b", 0}, {"node-a", 1}},
 				},
@@ -1544,7 +1587,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone1").Label("node", "node-b").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{nodeConstraint},
+				Constraints:       []topologySpreadConstraint{nodeConstraint},
+				TpKeyToDomainsNum: map[string]int{"node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-a", 1}, {"node-b", 1}},
 				},
@@ -1569,7 +1613,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone1").Label("node", "node-b").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{nodeConstraint},
+				Constraints:       []topologySpreadConstraint{nodeConstraint},
+				TpKeyToDomainsNum: map[string]int{"node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-a", 0}, {"node-b", 1}},
 				},
@@ -1594,7 +1639,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone1").Label("node", "node-b").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{nodeConstraint},
+				Constraints:       []topologySpreadConstraint{nodeConstraint},
+				TpKeyToDomainsNum: map[string]int{"node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"node": {{"node-a", 0}, {"node-b", 2}},
 				},
@@ -1618,7 +1664,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-x").Label("zone", "zone2").Label("node", "node-x").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint, nodeConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint, nodeConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 0}, {"zone1", 1}},
 					"node": {{"node-x", 0}, {"node-a", 1}},
@@ -1647,7 +1694,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-x").Label("zone", "zone2").Label("node", "node-x").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint, nodeConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint, nodeConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 1}, {"zone2", 1}},
 					"node": {{"node-a", 1}, {"node-x", 1}},
@@ -1679,7 +1727,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-x").Label("zone", "zone2").Label("node", "node-x").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint, nodeConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint, nodeConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 1}, {"zone1", 3}},
 					"node": {{"node-a", 1}, {"node-x", 1}},
@@ -1723,6 +1772,7 @@ func TestPreFilterStateAddPod(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 1}, {"zone1", 2}},
 					"node": {{"node-a", 0}, {"node-b", 1}},
@@ -1766,6 +1816,7 @@ func TestPreFilterStateAddPod(t *testing.T) {
 						NodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore,
 					},
 				},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 1}, {"zone2", 1}},
 					"node": {{"node-a", 1}, {"node-b", 1}},
@@ -1795,7 +1846,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone2").Label("node", "node-b").Label("foo", "").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 1},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 1}, {MatchNum: math.MaxInt32}},
 				},
@@ -1821,7 +1873,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone2").Label("node", "node-b").Label("foo", "").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 1},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 1}, {MatchNum: math.MaxInt32}},
 				},
@@ -1847,7 +1900,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone2").Label("node", "node-b").Label("foo", "").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 1}, {"zone2", 2}},
 				},
@@ -1874,7 +1928,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone2").Label("node", "node-b").Label("foo", "").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 1}, {"zone2", 2}},
 				},
@@ -1901,7 +1956,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone2").Label("node", "node-b").Label("foo", "").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 1}, {"zone2", 1}},
 				},
@@ -1928,7 +1984,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone2").Label("node", "node-b").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 1}, {"zone2", 2}},
 				},
@@ -1955,7 +2012,8 @@ func TestPreFilterStateAddPod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone2").Label("node", "node-b").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 1}, {"zone2", 2}},
 				},
@@ -1971,7 +2029,7 @@ func TestPreFilterStateAddPod(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, ctx := ktesting.NewTestContext(t)
 			snapshot := cache.NewSnapshot(tt.existingPods, tt.nodes)
-			pl := plugintesting.SetupPlugin(t, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, snapshot)
+			pl := plugintesting.SetupPlugin(ctx, t, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, snapshot)
 			p := pl.(*PodTopologySpread)
 			p.enableNodeInclusionPolicyInPodTopologySpread = tt.enableNodeInclusionPolicy
 
@@ -2039,7 +2097,8 @@ func TestPreFilterStateRemovePod(t *testing.T) {
 			deletedPodIdx: 0, // remove pod "p-a1"
 			nodeIdx:       0, // node-a
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 1}, {"zone2", 1}},
 				},
@@ -2069,7 +2128,8 @@ func TestPreFilterStateRemovePod(t *testing.T) {
 			deletedPodIdx: 0, // remove pod "p-a1"
 			nodeIdx:       0, // node-a
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 1}, {"zone2", 2}},
 				},
@@ -2100,7 +2160,8 @@ func TestPreFilterStateRemovePod(t *testing.T) {
 			deletedPodIdx: 0, // remove pod "p-a0"
 			nodeIdx:       0, // node-a
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 2}, {"zone2", 2}},
 				},
@@ -2131,7 +2192,8 @@ func TestPreFilterStateRemovePod(t *testing.T) {
 			deletedPod:    st.MakePod().Name("p-a0").Node("node-a").Label("bar", "").Obj(),
 			nodeIdx:       0, // node-a
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone1", 2}, {"zone2", 2}},
 				},
@@ -2162,7 +2224,8 @@ func TestPreFilterStateRemovePod(t *testing.T) {
 			deletedPodIdx: 3, // remove pod "p-x1"
 			nodeIdx:       2, // node-x
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint, nodeConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint, nodeConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2, "node": 3},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 1}, {"zone1", 3}},
 					"node": {{"node-b", 1}, {"node-x", 1}},
@@ -2192,7 +2255,8 @@ func TestPreFilterStateRemovePod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone2").Label("node", "node-b").Label("foo", "").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 1},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 1}, {MatchNum: math.MaxInt32}},
 				},
@@ -2218,7 +2282,8 @@ func TestPreFilterStateRemovePod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone2").Label("node", "node-b").Label("foo", "").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 1},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 1}, {MatchNum: math.MaxInt32}},
 				},
@@ -2244,7 +2309,8 @@ func TestPreFilterStateRemovePod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone2").Label("node", "node-b").Label("foo", "").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 0}, {"zone1", 1}},
 				},
@@ -2271,7 +2337,8 @@ func TestPreFilterStateRemovePod(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone2").Label("node", "node-b").Label("foo", "").Obj(),
 			},
 			want: &preFilterState{
-				Constraints: []topologySpreadConstraint{zoneConstraint},
+				Constraints:       []topologySpreadConstraint{zoneConstraint},
+				TpKeyToDomainsNum: map[string]int{"zone": 2},
 				TpKeyToCriticalPaths: map[string]*criticalPaths{
 					"zone": {{"zone2", 0}, {"zone1", 1}},
 				},
@@ -2287,7 +2354,7 @@ func TestPreFilterStateRemovePod(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, ctx := ktesting.NewTestContext(t)
 			snapshot := cache.NewSnapshot(tt.existingPods, tt.nodes)
-			pl := plugintesting.SetupPlugin(t, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, snapshot)
+			pl := plugintesting.SetupPlugin(ctx, t, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, snapshot)
 			p := pl.(*PodTopologySpread)
 			p.enableNodeInclusionPolicyInPodTopologySpread = tt.enableNodeInclusionPolicy
 
@@ -2361,8 +2428,8 @@ func BenchmarkFilter(b *testing.B) {
 		var state *framework.CycleState
 		b.Run(tt.name, func(b *testing.B) {
 			existingPods, allNodes, _ := st.MakeNodesAndPodsForEvenPodsSpread(tt.pod.Labels, tt.existingPodsNum, tt.allNodesNum, tt.filteredNodesNum)
-			ctx := context.Background()
-			pl := plugintesting.SetupPlugin(b, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, cache.NewSnapshot(existingPods, allNodes))
+			_, ctx := ktesting.NewTestContext(b)
+			pl := plugintesting.SetupPlugin(ctx, b, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, cache.NewSnapshot(existingPods, allNodes))
 			p := pl.(*PodTopologySpread)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -2401,7 +2468,6 @@ func TestSingleConstraint(t *testing.T) {
 		nodes                     []*v1.Node
 		existingPods              []*v1.Pod
 		wantStatusCode            map[string]framework.Code
-		enableMinDomains          bool
 		enableNodeInclusionPolicy bool
 	}{
 		{
@@ -2716,7 +2782,7 @@ func TestSingleConstraint(t *testing.T) {
 				"node",
 				v1.DoNotSchedule,
 				fooSelector,
-				pointer.Int32(4), // larger than the number of domains(3)
+				ptr.To[int32](4), // larger than the number of domains(3)
 				nil,
 				nil,
 				nil,
@@ -2733,7 +2799,6 @@ func TestSingleConstraint(t *testing.T) {
 				st.MakePod().Name("p-b2").Node("node-b").Label("foo", "").Obj(),
 				st.MakePod().Name("p-c1").Node("node-c").Label("foo", "").Obj(),
 			},
-			enableMinDomains: true,
 			wantStatusCode: map[string]framework.Code{
 				"node-a": framework.Unschedulable,
 				"node-b": framework.Unschedulable,
@@ -2747,7 +2812,7 @@ func TestSingleConstraint(t *testing.T) {
 				"node",
 				v1.DoNotSchedule,
 				fooSelector,
-				pointer.Int32(2), // smaller than the number of domains(3)
+				ptr.To[int32](2), // smaller than the number of domains(3)
 				nil,
 				nil,
 				nil,
@@ -2764,7 +2829,6 @@ func TestSingleConstraint(t *testing.T) {
 				st.MakePod().Name("p-b2").Node("node-b").Label("foo", "").Obj(),
 				st.MakePod().Name("p-c1").Node("node-c").Label("foo", "").Obj(),
 			},
-			enableMinDomains: true,
 			wantStatusCode: map[string]framework.Code{
 				"node-a": framework.Success,
 				"node-b": framework.Success,
@@ -2778,7 +2842,7 @@ func TestSingleConstraint(t *testing.T) {
 				"zone",
 				v1.DoNotSchedule,
 				fooSelector,
-				pointer.Int32(3), // larger than the number of domains(2)
+				ptr.To[int32](3), // larger than the number of domains(2)
 				nil,
 				nil,
 				nil,
@@ -2794,7 +2858,6 @@ func TestSingleConstraint(t *testing.T) {
 				st.MakePod().Name("p-b2").Node("node-b").Label("foo", "").Obj(),
 				st.MakePod().Name("p-y1").Node("node-y").Label("foo", "").Obj(),
 			},
-			enableMinDomains: true,
 			wantStatusCode: map[string]framework.Code{
 				"node-a": framework.Unschedulable,
 				"node-b": framework.Unschedulable,
@@ -2809,7 +2872,7 @@ func TestSingleConstraint(t *testing.T) {
 				"zone",
 				v1.DoNotSchedule,
 				fooSelector,
-				pointer.Int32(1), // smaller than the number of domains(2)
+				ptr.To[int32](1), // smaller than the number of domains(2)
 				nil,
 				nil,
 				nil,
@@ -2825,7 +2888,6 @@ func TestSingleConstraint(t *testing.T) {
 				st.MakePod().Name("p-b2").Node("node-b").Label("foo", "").Obj(),
 				st.MakePod().Name("p-y1").Node("node-y").Label("foo", "").Obj(),
 			},
-			enableMinDomains: true,
 			wantStatusCode: map[string]framework.Code{
 				"node-a": framework.Success,
 				"node-b": framework.Success,
@@ -2992,9 +3054,8 @@ func TestSingleConstraint(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, ctx := ktesting.NewTestContext(t)
 			snapshot := cache.NewSnapshot(tt.existingPods, tt.nodes)
-			pl := plugintesting.SetupPlugin(t, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, snapshot)
+			pl := plugintesting.SetupPlugin(ctx, t, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, snapshot)
 			p := pl.(*PodTopologySpread)
-			p.enableMinDomainsInPodTopologySpread = tt.enableMinDomains
 			p.enableNodeInclusionPolicyInPodTopologySpread = tt.enableNodeInclusionPolicy
 			state := framework.NewCycleState()
 			if _, s := p.PreFilter(ctx, state, tt.pod); !s.IsSuccess() {
@@ -3337,7 +3398,7 @@ func TestMultipleConstraints(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, ctx := ktesting.NewTestContext(t)
 			snapshot := cache.NewSnapshot(tt.existingPods, tt.nodes)
-			pl := plugintesting.SetupPlugin(t, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, snapshot)
+			pl := plugintesting.SetupPlugin(ctx, t, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, snapshot)
 			p := pl.(*PodTopologySpread)
 			p.enableNodeInclusionPolicyInPodTopologySpread = tt.enableNodeInclusionPolicy
 			state := framework.NewCycleState()
@@ -3361,7 +3422,8 @@ func TestPreFilterDisabled(t *testing.T) {
 	nodeInfo := framework.NewNodeInfo()
 	node := v1.Node{}
 	nodeInfo.SetNode(&node)
-	p := plugintesting.SetupPlugin(t, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, cache.NewEmptySnapshot())
+	_, ctx := ktesting.NewTestContext(t)
+	p := plugintesting.SetupPlugin(ctx, t, topologySpreadFunc, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, cache.NewEmptySnapshot())
 	cycleState := framework.NewCycleState()
 	gotStatus := p.(*PodTopologySpread).Filter(context.Background(), cycleState, pod, nodeInfo)
 	wantStatus := framework.AsStatus(fmt.Errorf(`reading "PreFilterPodTopologySpread" from cycleState: %w`, framework.ErrNotFound))
